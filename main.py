@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+import pandas as pd  # Added import
 
 # Import modules with error handling
 try:
@@ -34,18 +35,14 @@ class ProfessionalCryptoAnalysisBot:
         """Initialize the professional analysis bot"""
         try:
             logger.info("🚀 Initializing Professional Crypto Analysis Bot...")
-
             self.config = AnalysisConfig()
             self.data_fetcher = CryptoDataFetcher(self.config.EXCHANGE)
             self.technical_analysis = ProfessionalAnalysis()
             self.report_formatter = ProfessionalReportFormatter(self.config)
             self.telegram = AnalysisTelegramController(self.config)
-
             self.is_running = False
             self.last_analysis_time = None
-
             logger.info("✅ Professional Analysis Bot initialized successfully")
-
         except Exception as e:
             logger.error(f"❌ Failed to initialize bot: {e}")
             raise
@@ -55,28 +52,34 @@ class ProfessionalCryptoAnalysisBot:
         try:
             if not symbol:
                 symbol = self.config.DEFAULT_SYMBOL
-
             logger.info(f"📊 Generating professional analysis for {symbol}...")
-
             # Fetch market data for multiple timeframes
             timeframes = ['15m', '1h', '4h', '1d']
             market_data = await self.data_fetcher.get_market_data(symbol, timeframes)
-
             if not market_data:
                 return f"❌ Unable to fetch market data for {symbol}"
-
             # Get current price information
             current_price_info = self.data_fetcher.get_current_price(symbol)
-
             # Get anchor candle (latest completed candle)
-            anchor_candle = self.data_fetcher.get_anchor_candle(market_data['15m'])
-
+            anchor_candle = {}
+            if '15m' in market_data and isinstance(market_data['15m'], pd.DataFrame):
+                anchor_candle = self.data_fetcher.get_anchor_candle(market_data['15m'])
             # Perform technical analysis for each timeframe
             analysis_results = {}
             for timeframe, df in market_data.items():
-                if not df.empty:
-                    analysis_results[timeframe] = self.technical_analysis.analyze_timeframe(df, timeframe)
-
+                # Skip market_context dict
+                if timeframe == 'market_context':
+                    continue
+                # Ensure type is DataFrame and not empty
+                if isinstance(df, pd.DataFrame) and not df.empty:
+                    try:
+                        analysis_results[timeframe] = self.technical_analysis.analyze_timeframe(df, timeframe)
+                        logger.info(f"✅ Analysis completed for {timeframe}")
+                    except Exception as e:
+                        logger.error(f"❌ Analysis failed for {timeframe}: {e}")
+                        continue
+                else:
+                    logger.warning(f"⚠️ Skipping {timeframe}: not a valid DataFrame")
             # Generate professional report
             professional_report = self.report_formatter.generate_analysis_report(
                 symbol=symbol,
@@ -85,12 +88,9 @@ class ProfessionalCryptoAnalysisBot:
                 anchor_candle=anchor_candle,
                 current_price_info=current_price_info
             )
-
             self.last_analysis_time = datetime.now()
             logger.info(f"✅ Professional analysis generated for {symbol}")
-
             return professional_report
-
         except Exception as e:
             logger.error(f"❌ Error generating analysis: {e}")
             return f"❌ Analysis generation failed for {symbol}: {str(e)}"
@@ -100,26 +100,21 @@ class ProfessionalCryptoAnalysisBot:
         try:
             logger.info("🔄 Starting automated analysis monitoring...")
             self.is_running = True
-
             while self.is_running:
                 try:
                     # Generate analysis for primary symbol
                     report = await self.generate_complete_analysis()
-
                     # Send via Telegram if configured
                     if self.telegram.initialized:
                         await self.telegram.send_analysis_report(report)
                     else:
                         logger.info("📊 Analysis generated (Telegram not configured)")
                         logger.info(f"Preview: {report[:200]}...")
-
                     # Wait for next analysis cycle (60 minutes)
                     await asyncio.sleep(self.config.ANALYSIS_INTERVAL * 60)
-
                 except Exception as e:
                     logger.error(f"❌ Error in analysis loop: {e}")
                     await asyncio.sleep(300)  # Wait 5 minutes on error
-
         except Exception as e:
             logger.error(f"❌ Fatal error in automated analysis: {e}")
 
@@ -139,19 +134,15 @@ analysis_bot = None
 async def lifespan(app: FastAPI):
     """FastAPI lifespan management"""
     global analysis_bot
-
     # Startup sequence
     logger.info("🚀 Starting Professional Crypto Analysis Bot...")
-
     try:
         # Initialize bot
         analysis_bot = ProfessionalCryptoAnalysisBot()
-
         # Initialize Telegram if token provided
         telegram_ready = False
         if (analysis_bot.config.TELEGRAM_TOKEN and 
             analysis_bot.config.TELEGRAM_TOKEN != 'YOUR_TELEGRAM_BOT_TOKEN_HERE'):
-
             telegram_ready = await analysis_bot.telegram.initialize()
             if telegram_ready:
                 await analysis_bot.telegram.start_webhook(analysis_bot.config.WEBHOOK_URL)
@@ -160,25 +151,18 @@ async def lifespan(app: FastAPI):
                 logger.warning("⚠️ Telegram initialization failed - running without notifications")
         else:
             logger.warning("⚠️ No Telegram token provided - running in analysis-only mode")
-
         # Generate initial analysis
         logger.info("📊 Generating initial market analysis...")
         initial_report = await analysis_bot.generate_complete_analysis()
-
         if telegram_ready:
             await analysis_bot.telegram.send_analysis_report(initial_report)
-
         # Start automated analysis in background
         asyncio.create_task(analysis_bot.run_automated_analysis())
-
         logger.info("✅ Professional Analysis Bot fully operational")
-
     except Exception as e:
         logger.error(f"❌ Startup failed: {e}")
         raise
-
     yield  # Application runs here
-
     # Shutdown sequence
     logger.info("🛑 Shutting down Professional Analysis Bot...")
     if analysis_bot:
@@ -211,7 +195,6 @@ async def detailed_status():
     """Detailed bot status"""
     if not analysis_bot:
         return {"error": "Bot not initialized"}
-
     return {
         "bot_status": "running" if analysis_bot.is_running else "stopped", 
         "primary_symbol": analysis_bot.config.DEFAULT_SYMBOL,
@@ -229,24 +212,19 @@ async def manual_analysis(symbol: str):
     """Generate manual analysis for specific symbol"""
     if not analysis_bot:
         return {"error": "Bot not initialized"}
-
     try:
         # Validate symbol format
         symbol_formatted = symbol.upper()
         if '/' not in symbol_formatted:
             symbol_formatted = f"{symbol_formatted}/USDT"
-
         logger.info(f"📊 Manual analysis requested for {symbol_formatted}")
-
         report = await analysis_bot.manual_analysis(symbol_formatted)
-
         return {
             "symbol": symbol_formatted,
             "analysis": report,
             "timestamp": datetime.now().isoformat(),
             "type": "manual_request"
         }
-
     except Exception as e:
         logger.error(f"❌ Manual analysis failed: {e}")
         return {"error": f"Analysis failed: {str(e)}"}
@@ -275,9 +253,7 @@ async def health_check():
 if __name__ == "__main__":
     import uvicorn
     import os
-
     # Get port from environment (required for Render)
     port = int(os.getenv('PORT', 8000))
-
     logger.info(f"🚀 Starting Professional Analysis Bot on port {port}")
     uvicorn.run(app, host="0.0.0.0", port=port)
